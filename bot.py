@@ -1186,7 +1186,7 @@ async def site_command(event):
 
     # WORKER-BASED CONCURRENT PROCESSING
     # Configurable number of workers - adjust based on your server capacity
-    MAX_WORKERS = 50  # Process 50 sites concurrently
+    MAX_WORKERS = 10  # Process 10 sites concurrently
 
     async def process_site_batch(site_batch):
         """Process a batch of sites concurrently"""
