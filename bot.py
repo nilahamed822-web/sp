@@ -14,7 +14,7 @@ API_ID = 39283277
 API_HASH = '56cd66f3f3fd7da78db44263ea05e0dc'
 BOT_TOKEN = '8462558990:AAGwph1KVBRIJw7ZTJ3cLJm0Qp3lvmIlO6I'
 ADMIN_ID = [7681846627]
-CHECKER_API_URL = 'https://brainaiapi.up.railway.app/shopify_parallel'
+CHECKER_API_URL = 'https://brainaispapi.up.railway.app/shopify_parallel'
 
 PREMIUM_USERS_FILE = "premium_users.txt"
 SITES_FILE = 'sites.txt'
