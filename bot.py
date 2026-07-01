@@ -12,7 +12,7 @@ from faker import Faker
 
 API_ID = 39283277
 API_HASH = '56cd66f3f3fd7da78db44263ea05e0dc'
-BOT_TOKEN = '8462558990:AAGwph1KVBRIJw7ZTJ3cLJm0Qp3lvmIlO6I'
+BOT_TOKEN = '8462558990:AAGAGGWDU-x9GuEbvAoFo0DdP4_sEvXtRF4'
 ADMIN_ID = [7681846627]
 CHECKER_API_URL = 'https://brainaispapi.up.railway.app/shopify_parallel'
 
